@@ -1,0 +1,12 @@
+README.md
+pyproject.toml
+agentir_sdk/__init__.py
+agentir_sdk/client_logger.py
+agentir_sdk/contract.py
+agentir_sdk/decorators.py
+agentir_sdk/graph_proxy.py
+agentir_sdk/rid.py
+agentir_sdk.egg-info/PKG-INFO
+agentir_sdk.egg-info/SOURCES.txt
+agentir_sdk.egg-info/dependency_links.txt
+agentir_sdk.egg-info/top_level.txt
