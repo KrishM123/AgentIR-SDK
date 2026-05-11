@@ -1,5 +1,6 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 from dataclasses import dataclass
+from collections import deque
 import uuid
 import functools
 from langgraph.graph import StateGraph, START, END
@@ -12,6 +13,13 @@ from .rid import *
 class _NodeRecord:
     name: str
     fn: Any
+
+
+@dataclass
+class _ConditionalEdgeAnnotation:
+    src: str
+    destinations: List[List[str]]
+    frontiers: Optional[List[List[str]]]
 
 
 class GraphProxy:
@@ -34,7 +42,191 @@ class GraphProxy:
         self._g = state_graph
         self._nodes: Dict[str, _NodeRecord] = {'START': _NodeRecord(name='START', fn=None), 'END': _NodeRecord(name='END', fn=None)}
         self._edges: List[Edge] = []
+        self._conditional_edge_annotations: List[_ConditionalEdgeAnnotation] = []
+        self._contract_edge_entries: List[Any] = []
         self._entry_point: Optional[str] = None
+
+    def _record_edge(self, edge: Edge):
+        self._edges.append(edge)
+        self._contract_edge_entries.append(edge)
+
+    def _record_conditional_annotation(self,
+                                       annotation: _ConditionalEdgeAnnotation):
+        self._conditional_edge_annotations.append(annotation)
+        self._contract_edge_entries.append(annotation)
+
+    def _remove_recorded_edge(self, edge: Edge):
+        for index, existing_edge in enumerate(self._edges):
+            if existing_edge is edge:
+                del self._edges[index]
+                break
+        for index, entry in enumerate(self._contract_edge_entries):
+            if entry is edge:
+                del self._contract_edge_entries[index]
+                break
+
+    def _copy_grouped_node_names(self,
+                                 groups: List[List[str]],
+                                 field_name: str,
+                                 *,
+                                 allow_empty_groups: bool = False) -> List[List[str]]:
+        if not groups:
+            raise ValueError(f"{field_name} must contain at least one group")
+
+        normalized_groups: List[List[str]] = []
+        for group in groups:
+            if not group and not allow_empty_groups:
+                raise ValueError(f"{field_name} groups cannot be empty")
+            normalized_group: List[str] = []
+            for node_name in group:
+                if not isinstance(node_name, str):
+                    raise ValueError(
+                        f"{field_name} entries must be node names (strings)")
+                normalized_group.append(node_name)
+            normalized_groups.append(normalized_group)
+        return normalized_groups
+
+    def _resolve_contract_edges(self) -> List[Edge]:
+        resolved_edges: List[Edge] = []
+        for entry in self._contract_edge_entries:
+            if isinstance(entry, Edge):
+                resolved_edges.append(entry)
+                continue
+
+            annotation = entry
+            for group_index, destinations in enumerate(annotation.destinations):
+                label = f"conditional_{group_index}"
+                for dst in destinations:
+                    resolved_edges.append(
+                        Edge(src=annotation.src, dst=dst, label=label))
+        return resolved_edges
+
+    def _dedupe_edges(self, edges: List[Edge]) -> List[Edge]:
+        seen_edges = set()
+        unique_edges: List[Edge] = []
+        for edge in edges:
+            edge_tuple = (edge.src, edge.dst, edge.label)
+            if edge_tuple in seen_edges:
+                continue
+            seen_edges.add(edge_tuple)
+            unique_edges.append(edge)
+        return unique_edges
+
+    def _build_adjacency(self, edges: List[Edge]) -> Dict[str, List[str]]:
+        adjacency: Dict[str, List[str]] = {}
+        for edge in edges:
+            adjacency.setdefault(edge.src, [])
+            if edge.dst not in adjacency[edge.src]:
+                adjacency[edge.src].append(edge.dst)
+        return adjacency
+
+    def _validate_conditional_annotation_nodes(
+            self, annotation: _ConditionalEdgeAnnotation,
+            contract_nodes: Dict[str, NodeMeta]):
+        if annotation.src not in contract_nodes:
+            raise ValueError(
+                f"annotate_conditional_edge source '{annotation.src}' was not added to the graph")
+
+        for group in annotation.destinations:
+            for node_name in group:
+                if node_name not in contract_nodes:
+                    raise ValueError(
+                        f"annotate_conditional_edge destination '{node_name}' was not added to the graph")
+
+        if annotation.frontiers is None:
+            return
+
+        for group in annotation.frontiers:
+            for node_name in group:
+                if node_name not in contract_nodes:
+                    raise ValueError(
+                        f"annotate_conditional_edge frontier '{node_name}' was not added to the graph")
+
+    def _compute_non_llm_reachability_owners(
+            self, destinations: List[List[str]], contract_nodes: Dict[str, NodeMeta],
+            adjacency: Dict[str, List[str]]) -> Dict[str, Set[int]]:
+        owners: Dict[str, Set[int]] = {}
+
+        for group_index, dest_group in enumerate(destinations):
+            queue = deque(dest_group)
+            seen: Set[str] = set()
+
+            while queue:
+                node_name = queue.popleft()
+                if node_name in seen:
+                    continue
+                seen.add(node_name)
+
+                node = contract_nodes[node_name]
+                if node.llm_calls:
+                    continue
+
+                owners.setdefault(node_name, set()).add(group_index)
+                for child_name in adjacency.get(node_name, []):
+                    queue.append(child_name)
+
+        return owners
+
+    def _infer_first_llm_frontier(
+            self, group_index: int, destinations: List[str],
+            contract_nodes: Dict[str, NodeMeta], adjacency: Dict[str, List[str]],
+            non_llm_reachability_owners: Dict[str, Set[int]]) -> List[str]:
+        frontier: List[str] = []
+        queue = deque(destinations)
+        seen: Set[str] = set()
+
+        while queue:
+            node_name = queue.popleft()
+            if node_name in seen:
+                continue
+            seen.add(node_name)
+
+            node = contract_nodes[node_name]
+            if node.llm_calls:
+                if node_name not in frontier:
+                    frontier.append(node_name)
+                continue
+
+            owners = non_llm_reachability_owners.get(node_name, set())
+            if owners and owners != {group_index}:
+                # If mutually-exclusive branches merge before any LLM node, the
+                # first downstream LLM is no longer uniquely attributable to one
+                # branch. Leave that case to the explicit frontier override.
+                continue
+
+            for child_name in adjacency.get(node_name, []):
+                queue.append(child_name)
+
+        return frontier
+
+    def _apply_conditional_edge_annotations(
+            self, contract_nodes: Dict[str, NodeMeta], edges: List[Edge]):
+        adjacency = self._build_adjacency(edges)
+
+        for annotation in self._conditional_edge_annotations:
+            self._validate_conditional_annotation_nodes(annotation, contract_nodes)
+            non_llm_reachability_owners = self._compute_non_llm_reachability_owners(
+                annotation.destinations, contract_nodes, adjacency)
+
+            for group_index, destinations in enumerate(annotation.destinations):
+                seq_var = f"seq_{uuid.uuid4().hex[:8]}"
+                contract_nodes[annotation.src].writes.add(seq_var)
+
+                if annotation.frontiers is None:
+                    frontier_nodes = self._infer_first_llm_frontier(
+                        group_index, destinations, contract_nodes, adjacency,
+                        non_llm_reachability_owners)
+                else:
+                    frontier_nodes = list(dict.fromkeys(annotation.frontiers[group_index]))
+
+                for frontier_name in frontier_nodes:
+                    frontier_node = contract_nodes[frontier_name]
+                    if not frontier_node.llm_calls:
+                        raise ValueError(
+                            f"annotate_conditional_edge frontier '{frontier_name}' must be an LLM node")
+                    for llm_call in frontier_node.llm_calls:
+                        if seq_var not in llm_call.reads:
+                            llm_call.reads.append(seq_var)
 
     def _ensure_rid_node(self):
         def __gp_ensure_rid(state, config):
@@ -118,47 +310,44 @@ class GraphProxy:
                 src_text = 'START'
             if dst == END:
                 dst_text = 'END'
-            self._edges.append(Edge(src=src_text, dst=dst_text, label=label))
+            self._record_edge(Edge(src=src_text, dst=dst_text, label=label))
         else:
             raise ValueError(f"Invalid edge: {src} -> {dst}")
         return self._g.add_edge(src, dst)
 
-    def annotate_conditional_edge(self, src: str, destinations: List[List[str]]):
+    def annotate_conditional_edge(self,
+                                  src: str,
+                                  destinations: List[List[str]],
+                                  *,
+                                  frontiers: Optional[List[List[str]]] = None):
         """
         Annotate the routing structure for a conditional edge before calling add_conditional_edges.
-        This method adds a random variable to the source node's writes and the destination node's reads to enforce sequentiality.
         Args:
             src: Source node name
             destinations: List of fanout groups. Each group is a list of destination strings.
                         For single destinations, use a list with one element: [["single_dest"]]
                         For fanout to multiple nodes: [["dest1", "dest2"]]
                         For multiple fanout groups: [["group1a", "group1b"], ["group2"]]
+            frontiers: Optional explicit LLM frontier groups. When omitted, GraphProxy
+                        infers the first downstream LLM nodes that still belong uniquely
+                        to each conditional branch.
         """
-        for i, dest_group in enumerate(destinations):
-            for dst in dest_group:
-                # Generate a random variable name for sequentiality enforcement
-                random_var = f"seq_{uuid.uuid4().hex[:8]}"
-                
-                # Mark as conditional edge
-                label = f"conditional_{i}" if len(destinations) > 1 else "conditional"
-                self._edges.append(Edge(src=src, dst=dst, label=label))
-                
-                # Add the random variable to source node's writes
-                if src in self._nodes:
-                    src_node = self._nodes[src]
-                    if src_node.fn is not None:
-                        if not hasattr(src_node.fn, D.META_WRITES):
-                            setattr(src_node.fn, D.META_WRITES, set())
-                        getattr(src_node.fn, D.META_WRITES).add(random_var)
-                
-                # Add the random variable to destination node's reads
-                if dst in self._nodes:
-                    dst_node = self._nodes[dst]
-                    if dst_node.fn is not None:
-                        if hasattr(dst_node.fn, D.META_LLM_CALLS):
-                            llm_calls = getattr(dst_node.fn, D.META_LLM_CALLS)
-                            if llm_calls:
-                                llm_calls[0].setdefault('reads', []).append(random_var)
+        normalized_destinations = self._copy_grouped_node_names(
+            destinations, "destinations")
+        normalized_frontiers = None
+        if frontiers is not None:
+            normalized_frontiers = self._copy_grouped_node_names(
+                frontiers, "frontiers", allow_empty_groups=True)
+            if len(normalized_frontiers) != len(normalized_destinations):
+                raise ValueError(
+                    "frontiers must have the same number of groups as destinations")
+
+        self._record_conditional_annotation(
+            _ConditionalEdgeAnnotation(
+                src=src,
+                destinations=normalized_destinations,
+                frontiers=normalized_frontiers,
+            ))
 
     def add_conditional_edges(self, *args, **kwargs):
         """
@@ -176,12 +365,12 @@ class GraphProxy:
         self._g.add_edge(guard, name)
         
         # Record edges for contract
-        self._edges.append(Edge(src='START', dst=guard, label=None))
-        self._edges.append(Edge(src=guard, dst=name, label=None))
+        self._record_edge(Edge(src='START', dst=guard, label=None))
+        self._record_edge(Edge(src=guard, dst=name, label=None))
         return self._g
 
     def set_finish_point(self, name: str):
-        self._edges.append(Edge(src=name, dst='END', label=None))
+        self._record_edge(Edge(src=name, dst='END', label=None))
         return self._g.set_finish_point(name)
 
     def attach_graph(self, 
@@ -231,7 +420,7 @@ class GraphProxy:
                     dst=f"{namespace}{edge.dst}",
                     label=edge.label
                 )
-                self._edges.append(new_edge)
+                self._record_edge(new_edge)
         
         # Now connect the incoming and outgoing edges properly
         if sub_first_nodes:
@@ -243,8 +432,8 @@ class GraphProxy:
                             dst=f"{namespace}{sub_first_node}",
                             label=edge.label
                         )
-                        self._edges.append(new_edge)
-                    self._edges.remove(edge)
+                        self._record_edge(new_edge)
+                    self._remove_recorded_edge(edge)
         
         if sub_last_nodes:
             for edge in self._edges:
@@ -255,8 +444,8 @@ class GraphProxy:
                             dst=edge.dst,
                             label=edge.label
                         )
-                        self._edges.append(new_edge)
-                    self._edges.remove(edge)
+                        self._record_edge(new_edge)
+                    self._remove_recorded_edge(edge)
 
     # --- outputs ---
     def materialize(self):
@@ -294,15 +483,9 @@ class GraphProxy:
             writes=set(),
             llm_calls=[],
         )
-        
-        # edges - remove duplicates while preserving order
-        seen_edges = set()
-        unique_edges = []
-        for edge in self._edges:
-            edge_tuple = (edge.src, edge.dst, edge.label)
-            if edge_tuple not in seen_edges:
-                seen_edges.add(edge_tuple)
-                unique_edges.append(edge)
+
+        unique_edges = self._dedupe_edges(self._resolve_contract_edges())
+        self._apply_conditional_edge_annotations(c.nodes, unique_edges)
         
         # Check if all writes and reads are empty, add dummy variables if so
         all_writes_empty = all(not node.writes for node in c.nodes.values())

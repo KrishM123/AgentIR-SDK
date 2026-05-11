@@ -120,6 +120,19 @@ Why this matters:
 - It makes branch possibilities explicit in the generated contract.
 - It improves dependency visibility for schedulers and analyzers.
 
+If a conditional branch first passes through non-LLM nodes, `GraphProxy` will
+infer the first downstream LLM frontier for that branch automatically. When a
+branch merges with another branch before the first LLM node, that frontier is
+ambiguous; use `frontiers=` to pin it explicitly:
+
+```python
+G.annotate_conditional_edge(
+    "router",
+    [["non_llm_gateway"], ["direct_llm"]],
+    frontiers=[["writer", "critic"], ["direct_llm"]],
+)
+```
+
 ## Contract Shape
 
 `build_contract()` returns a `Contract` object with:
