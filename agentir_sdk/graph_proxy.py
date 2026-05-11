@@ -253,7 +253,8 @@ class GraphProxy:
             out = fn(state, config=config, *a, **kw)
             if not was_rid_used():
                 print(f"[GraphProxy] Warning: node '{node_name}' appears to call an SDK "
-                      f"but never accessed RID; add X-Run-Id=get_rid() to request headers.")
+                      f"but never accessed RID; ensure its client binds scheduler headers "
+                      f"or calls get_rid() directly.")
             return out
         return _wrapped
 
@@ -294,7 +295,8 @@ class GraphProxy:
                 mentions = fn_mentions_get_rid(fn)
                 if mentions is False:
                     print(f"[GraphProxy] Warning: {name} has no detectable LLM handle "
-                          f"and no get_rid() mention; ensure SDK headers include the RID.")
+                          f"and no get_rid() mention; ensure scheduler-bound clients "
+                          f"bind RID headers through the SDK.")
                 # Optional runtime check
                 fn = self._wrap_node_with_rid_usage_check(fn, name)
 

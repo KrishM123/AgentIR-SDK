@@ -100,6 +100,23 @@ graph = G.materialize().compile()
 
 `agentir_sdk/rid.py` provides low-level helpers (`get_rid`, node-name context helpers, and wrappers) if you build custom LLM adapters.
 
+If you keep a user-owned scheduler client with its own `.invoke()` method, opt
+it into SDK header binding instead of reading `get_rid()` manually inside each
+node:
+
+```python
+from agentir_sdk.rid import SchedulerHeaderBindableMixin
+
+
+class SchedulerGateway(SchedulerHeaderBindableMixin):
+    def invoke(self, node_name: str, prompt: str) -> str:
+        headers = self.bound_scheduler_headers()
+        ...
+```
+
+`GraphProxy` can then wrap the client object in place, bind the scheduler RID
+and node name for each node call, and leave your node-level call sites alone.
+
 ## Conditional Routing Annotation
 
 If you use `add_conditional_edges`, annotate route possibilities first:

@@ -7,6 +7,7 @@ This folder is a copy-ready SDK export. Move it into a separate repository and i
 - annotate graph nodes with read/write metadata
 - build scheduler-facing graph contracts
 - propagate RID and node-name metadata into model calls
+- bind scheduler headers into custom `.invoke()` wrappers
 - provide lightweight client-side logging helpers
 
 ## What Belongs Here
