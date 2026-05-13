@@ -1,5 +1,5 @@
 Metadata-Version: 2.4
-Name: agentir-sdk
+Name: agentir-langgraph-annotation
 Version: 0.1.0
 Summary: Public AgentIR SDK, decorators, contract tooling, and client logging helpers.
 License-Expression: MIT
