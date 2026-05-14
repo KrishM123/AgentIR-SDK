@@ -1,7 +1,0 @@
-LICENSE
-README.md
-pyproject.toml
-agentir_sdk.egg-info/PKG-INFO
-agentir_sdk.egg-info/SOURCES.txt
-agentir_sdk.egg-info/dependency_links.txt
-agentir_sdk.egg-info/top_level.txt

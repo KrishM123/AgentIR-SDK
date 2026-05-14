@@ -1,7 +1,0 @@
-LICENSE
-README.md
-pyproject.toml
-agentir_langgraph_annotation.egg-info/PKG-INFO
-agentir_langgraph_annotation.egg-info/SOURCES.txt
-agentir_langgraph_annotation.egg-info/dependency_links.txt
-agentir_langgraph_annotation.egg-info/top_level.txt

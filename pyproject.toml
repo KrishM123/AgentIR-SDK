@@ -3,11 +3,12 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "agentir-langgraph-annotation"
+name = "agentir-langgraph"
 version = "0.1.0"
-description = "Public AgentIR SDK, decorators, contract tooling, and client logging helpers."
-license = "MIT"
+description = "AgentIR LangGraph integration: decorators, contract tooling, and client logging helpers."
+license = { text = "MIT" }
+requires-python = ">=3.9"
 
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["agentir_sdk*"]
+where = ["src"]
+include = ["agentir_langgraph*"]
